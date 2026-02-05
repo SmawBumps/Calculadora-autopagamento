@@ -1,0 +1,364 @@
+# app.py — VERSÃO FINAL PERFEITA (com dica de sufixos pequena e bonita)
+
+from flask import Flask, request, render_template_string, jsonify
+import yfinance as yf
+import math
+
+app = Flask(__name__)
+
+# ---------------------------
+# BUSCAR AÇÃO
+# ---------------------------
+def buscar_acao(ticker):
+    ticker = ticker.upper().strip()
+    try:
+        tk = yf.Ticker(ticker)
+        info = tk.info or {}
+
+        preco = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
+        if not preco:
+            hist = tk.history(period="1d")
+            if not hist.empty:
+                preco = hist['Close'].iloc[-1]
+        if not preco: return None
+
+        dy = info.get("trailingAnnualDividendYield", 0)
+        if dy > 0 and dy < 1: dy *= 100
+
+        nome = info.get("longName") or info.get("shortName") or ticker
+        currency = info.get("currency", "USD")
+        exchange_full = info.get("fullExchangeName") or info.get("exchange") or "Bolsa desconhecida"
+
+        return {
+            "ticker": ticker,
+            "preco": float(preco),
+            "currency": currency,
+            "exchange_full": exchange_full,
+            "dividend_yield": round(dy, 6),
+            "nome_completo": nome,
+            "tk_obj": tk
+        }
+    except Exception:
+        return None
+
+# ---------------------------
+# CÁLCULO DOS DIVIDENDOS — CORRIGIDO E PERFEITO
+# ---------------------------
+def calcular_div_mensal_e_freq(tk):
+    try:
+        import pandas as pd
+        divs = tk.dividends
+        if divs is None or divs.empty:
+            return 0.01, 0.01, "anual"
+
+        divs.index = divs.index.tz_localize(None)
+        # Usar loc com máscara ao invés de .last() que é deprecated
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=365)
+        ultimos_12 = divs.loc[divs.index >= cutoff]
+        if ultimos_12.empty:
+            return 0.01, 0.01, "anual"
+
+        sample = ultimos_12.tail(4)
+        div_anual = round(sample.sum(), 6)
+        if div_anual <= 0:
+            div_anual = 0.01
+
+        datas = list(sample.index)
+        if len(datas) >= 2:
+            delta_days = (datas[-1] - datas[0]).days / max(len(datas)-1, 1)
+            if delta_days <= 40:
+                freq = "mensal"
+            elif delta_days <= 110:
+                freq = "trimestral"
+            elif delta_days <= 220:
+                freq = "semestral"
+            else:
+                freq = "anual"
+        else:
+            freq = "anual"
+
+        if freq == "mensal":
+            div_mensal = div_anual / 12
+        elif freq == "trimestral":
+            div_mensal = div_anual / 4
+        elif freq == "semestral":
+            div_mensal = div_anual / 2
+        else:
+            div_mensal = div_anual / 12
+
+        if div_mensal <= 0:
+            div_mensal = 0.01
+
+        return round(div_mensal, 6), round(div_anual, 6), freq
+    except Exception:
+        return 0.01, 0.01, "anual"
+
+# ---------------------------
+# PREPARAR RESULTADO
+# ---------------------------
+def calcular_cotas(dados):
+    tk = dados.get("tk_obj", None)
+    div_mensal, div_anual, freq = calcular_div_mensal_e_freq(tk) if tk else (0.01, 0.01, "anual")
+
+    preco = dados.get("preco", 0.0)
+    quantidade = math.ceil(preco / div_mensal) if div_mensal > 0 else 0
+    investimento_total = round(quantidade * preco, 2)
+    quantidade_anual = math.ceil(preco / div_anual) if div_anual > 0 else 0
+    investimento_total_anual = round(quantidade_anual * preco, 2)
+
+    dy = dados.get("dividend_yield", 0)
+    dy_formatado = f"{dy:.2f}".rstrip("0").rstrip(".") + "%" if dy > 0 else "0%"
+
+    return {
+        "ticker": dados.get("ticker"),
+        "preco": preco,
+        "currency": dados.get("currency"),
+        "exchange_full": dados.get("exchange_full"),
+        "nome_completo": dados.get("nome_completo"),
+        "dividend_yield": dy,
+        "dividend_yield_formatado": dy_formatado,
+        "div_mensal": div_mensal,
+        "div_anual": div_anual,
+        "freq": freq,
+        "quantidade": quantidade,
+        "investimento_total": investimento_total,
+        "quantidade_anual": quantidade_anual,
+        "investimento_total_anual": investimento_total_anual
+    }
+
+# ---------------------------
+# HTML TEMPLATE — Integrado do front_.index
+# ---------------------------
+html_template = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Calculadora de Autopagamento</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {font-family:'Poppins',sans-serif;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;color:#fdf6e3;}
+.container {background:#1c1c1c;border-radius:25px;padding:30px 24px;width:100%;max-width:920px;box-shadow:0 25px 60px rgba(0,0,0,0.5);text-align:center;}
+h1 {font-size:28px;margin-bottom:8px;color:#f4d03f;}
+.row {display:flex;gap:8px;justify-content:center;align-items:center;margin-bottom:10px;flex-wrap:wrap;}
+input[type="text"] {padding:12px;border-radius:10px;border:none;font-size:14px;}
+input.main {width:58%;text-align:center;}
+input.short {width:34%;text-align:center;}
+button {padding:10px 18px;border:none;border-radius:10px;background:linear-gradient(135deg,#f4d03f,#f39c12);color:#1c1c1c;font-weight:700;cursor:pointer;transition:0.18s;}
+button:hover {transform:translateY(-3px);box-shadow:0 8px 20px rgba(0,0,0,0.25);}
+.card {background:linear-gradient(135deg,rgba(244,208,63,0.08),rgba(243,156,18,0.06));padding:12px 14px;margin-bottom:12px;border-radius:12px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 5px 15px rgba(0,0,0,0.15);transition:0.22s;}
+.card:hover {transform:translateY(-8px) scale(1.02);background:#f4d03f;color:#111;box-shadow:0 14px 30px rgba(0,0,0,0.25);}
+.card b {color:#f4d03f;}
+.card:hover b {color:#111;}
+.progress-container {background:rgba(0,0,0,0.1);border-radius:10px;height:10px;width:100%;margin-top:6px;overflow:hidden;}
+.progress-bar {height:100%;background:#f4d03f;border-radius:10px;transition:width 0.8s ease;}
+.card:hover .progress-bar {background:#111 !important;}
+.history {margin-top:12px;display:flex;flex-wrap:wrap;justify-content:center;gap:6px;}
+.history button {padding:8px 10px;border-radius:8px;background:#f4d03f;color:#111;font-weight:700;border:none;cursor:pointer;}
+.spinner {border:4px solid rgba(255,255,255,0.15);border-top:4px solid #f4d03f;border-radius:50%;width:26px;height:26px;animation:spin 1s linear infinite;display:inline-block;margin-right:8px;}
+@keyframes spin {to{transform:rotate(360deg);}}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Calculadora de Autopagamento</h1>
+<p>Digite o ticker da ação ou ETF (ex.: AAPL, HO.PA, 7203.T, PETR4.SA):</p>
+<div class="row">
+    <input type="text" id="ticker" class="main" placeholder="Ex: AAPL, HO.PA, PETR4.SA">
+    <button id="btnBuscar">Calcular</button>
+</div>
+
+<!-- DICAS DE SUFIXOS — PEQUENA, LIMPA E BONITA -->
+<p style="margin-top:8px; font-size:13px; color:#aaa; text-align:center;">
+    Dica de sufixos: 
+    <b>.SA</b> → Brasil · 
+    <b>.PA</b> → França · 
+    <b>.DE</b> → Alemanha · 
+    <b>.L</b> → Reino Unido · 
+    <b>.T</b> → Japão · 
+    sem sufixo → EUA
+</p>
+
+<p style="margin-top:20px; color:#f4d03f; font-weight:700;">Comparar duas ações</p>
+<div class="row">
+    <input type="text" id="ticker1" class="short" placeholder="Ação 1 (ex: PETR4.SA)">
+    <input type="text" id="ticker2" class="short" placeholder="Ação 2 (ex: VALE3.SA)">
+    <button id="btnComparar">Comparar</button>
+</div>
+
+<div id="resultado" class="result"></div>
+<div class="history" id="history"></div>
+<div id="comparacao"></div>
+</div>
+
+<script>
+let lastTickers = [];
+
+function formatBR(v) {
+    return Number(v).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function addHistory(ticker){
+    if(!ticker || lastTickers.includes(ticker)) return;
+    lastTickers.unshift(ticker);
+    if(lastTickers.length>6) lastTickers.pop();
+    const h = document.getElementById('history'); h.innerHTML='';
+    lastTickers.forEach(t=>{
+        const b=document.createElement('button');
+        b.textContent=t;
+        b.addEventListener('click', ()=>{
+            document.getElementById('ticker').value=t;
+            buscar();
+        });
+        h.appendChild(b);
+    });
+}
+
+// Setup event listeners
+document.addEventListener('DOMContentLoaded', ()=>{
+    const btnBuscar = document.getElementById('btnBuscar');
+    const btnComparar = document.getElementById('btnComparar');
+    const tickerInput = document.getElementById('ticker');
+
+    if(btnBuscar) btnBuscar.addEventListener('click', buscar);
+    if(btnComparar) btnComparar.addEventListener('click', comparar);
+    
+    if(tickerInput){
+        tickerInput.addEventListener('keydown', (e)=>{
+            if(e.key === 'Enter') buscar();
+        });
+    }
+});
+
+async function buscar(){
+    const ticker = document.getElementById('ticker').value.trim();
+    const resDiv = document.getElementById('resultado');
+    const comparDiv = document.getElementById('comparacao');
+    comparDiv.innerHTML = '';
+
+    if(!ticker){
+        resDiv.innerHTML = `<div class="card"><div class="left"><b>Erro:</b> Digite um ticker válido</div></div>`;
+        return;
+    }
+
+    resDiv.innerHTML = `<div class="card"><div class="left"><span class="spinner"></span> Buscando ${ticker}...</div></div>`;
+
+    try {
+        const response = await fetch('/buscar', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticker})});
+        const data = await response.json();
+
+        if(data.erro){
+            resDiv.innerHTML = `<div class="card"><div class="left"><b>Erro:</b> ${data.erro}</div></div>`;
+            return;
+        }
+
+        addHistory(data.ticker);
+
+        resDiv.innerHTML = `
+            <div class="card"><div class="left"><b>Ticker:</b> ${data.ticker}</div><div class="right">${data.nome_completo}</div></div>
+            <div class="card"><div class="left"><b>Bolsa:</b></div><div class="right">${data.exchange_full}</div></div>
+            <div class="card"><div class="left"><b>Preço:</b></div><div class="right">${data.currency} ${formatBR(data.preco)}</div></div>
+            <div class="card">
+                <div class="left"><b>Dividend Yield:</b> ${data.dividend_yield_formatado} ao ano</div>
+                <div class="right" style="width:220px;">
+                    <div class="progress-container"><div class="progress-bar" style="width:${Math.min(data.dividend_yield*2,100)}%"></div></div>
+                    <small style="opacity:.8">(bruto)</small>
+                </div>
+            </div>
+            <div class="card"><div class="left"><b>Frequência:</b></div><div class="right">${data.freq}</div></div>
+            <div class="card"><div class="left"><b>Dividendos Anual/Cota:</b></div><div class="right">${data.currency} ${formatBR(data.div_anual)}</div></div>
+            <div class="card"><div class="left"><b>Dividendo Mensal/Cota:</b></div><div class="right">${data.currency} ${formatBR(data.div_mensal)}</div></div>
+            <div class="card"><div class="left"><b>Cotas Necessárias (Mensal):</b></div><div class="right">${data.quantidade}</div></div>
+            <div class="card"><div class="left"><b>Investimento Total (Mensal):</b></div><div class="right">${data.currency} ${formatBR(data.investimento_total)}</div></div>
+            <div class="card"><div class="left"><b>Cotas Necessárias (Anual):</b></div><div class="right">${data.quantidade_anual}</div></div>
+            <div class="card"><div class="left"><b>Investimento Total (Anual):</b></div><div class="right">${data.currency} ${formatBR(data.investimento_total_anual)}</div></div>
+        `;
+    } catch (err) {
+        resDiv.innerHTML = `<div class="card"><div class="left"><b>Erro:</b> Falha na requisição.</div></div>`;
+    }
+}
+
+async function comparar(){
+    const a1 = document.getElementById('ticker1').value.trim().toUpperCase();
+    const a2 = document.getElementById('ticker2').value.trim().toUpperCase();
+    const div = document.getElementById('comparacao');
+    
+    if(!a1 || !a2){ 
+        div.innerHTML = `<div class="card"><div class="left"><b>Erro:</b> Preencha os dois tickers.</div></div>`; 
+        return; 
+    }
+    
+    div.innerHTML = `<div class="card"><div class="left"><span class="spinner"></span> Comparando...</div></div>`;
+    
+    try {
+        const resp = await fetch('/comparar', {
+            method:'POST', 
+            headers:{'Content-Type':'application/json'}, 
+            body:JSON.stringify({a1:a1, a2:a2})
+        });
+        const data = await resp.json();
+        
+        if(data.erro){ 
+            div.innerHTML = `<div class="card"><div class="left"><b>Erro:</b> ${data.erro}</div></div>`; 
+            return; 
+        }
+        
+        const A = data.acao1; 
+        const B = data.acao2;
+        
+        div.innerHTML = `
+            <div class="card"><div class="left"><b>${A.ticker}</b></div><div class="right">${A.currency} ${formatBR(A.preco)}</div></div>
+            <div class="card"><div class="left"><b>${B.ticker}</b></div><div class="right">${B.currency} ${formatBR(B.preco)}</div></div>
+            <div class="card"><div class="left"><b>${A.ticker} Dividend Yield:</b></div><div class="right">${A.dividend_yield_formatado}</div></div>
+            <div class="card"><div class="left"><b>${B.ticker} Dividend Yield:</b></div><div class="right">${B.dividend_yield_formatado}</div></div>
+            <div class="card"><div class="left"><b>${A.ticker} Investimento Mensal:</b></div><div class="right">${A.currency} ${formatBR(A.investimento_total)}</div></div>
+            <div class="card"><div class="left"><b>${B.ticker} Investimento Mensal:</b></div><div class="right">${B.currency} ${formatBR(B.investimento_total)}</div></div>
+        `;
+        
+        addHistory(A.ticker); 
+        addHistory(B.ticker);
+    } catch(e){ 
+        console.error(e);
+        div.innerHTML = `<div class="card"><div class="left"><b>Erro:</b> Falha na comparação.</div></div>`; 
+    }
+}
+</script>
+</body>
+</html>
+"""
+
+# ---------------------------
+# ROTAS
+# ---------------------------
+@app.route("/")
+def index():
+    return render_template_string(html_template)
+
+@app.route("/buscar", methods=["POST"])
+def rota_buscar():
+    data = request.get_json() or {}
+    ticker = (data.get("ticker") or "").strip()
+    if not ticker:
+        return jsonify({"erro":"Digite um ticker válido"})
+    acao = buscar_acao(ticker)
+    if not acao:
+        return jsonify({"erro": f'Ticker "{ticker}" não encontrado'})
+    resultado = calcular_cotas(acao)
+    return jsonify(resultado)
+
+@app.route("/comparar", methods=["POST"])
+def rota_comparar():
+    data = request.get_json() or {}
+    a1 = (data.get("a1") or "").strip()
+    a2 = (data.get("a2") or "").strip()
+    if not a1 or not a2:
+        return jsonify({"erro":"Envie dois tickers para comparar"})
+    ac1 = buscar_acao(a1)
+    ac2 = buscar_acao(a2)
+    if not ac1 or not ac2:
+        return jsonify({"erro":"Não foi possível buscar uma ou ambas ações"})
+    return jsonify({"acao1": calcular_cotas(ac1), "acao2": calcular_cotas(ac2)})
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
